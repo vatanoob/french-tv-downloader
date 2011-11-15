@@ -1,0 +1,107 @@
+#!/usr/bin/env python
+
+import httplib
+import lxml.etree
+import os
+import re
+import subprocess
+import sys
+import time
+
+URL_20H_BOOTSTRAP   = "http://jt.france2.fr/player/20h/index-fr.php"
+URI_WEBSERVICE      = "/appftv/webservices/video/getInfosOeuvre.php?mode=zeri&id-diffusion"
+RE_SPLIT_URL        = re.compile("^([a-z]+)://([^/]+)/(.*)")
+RE_EXTRACT_VIDEO_ID = re.compile("^.*id\-video=([^\"]+).*$")
+
+def fail(msg, exit_code=1):
+    sys.stderr.write("%s\n" % msg)
+    sys.stderr.flush()
+    sys.exit(exit_code)
+
+def execute(command):
+    pipe    = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
+    
+    time.sleep(.2) # Avoid pipe.poll() freezing
+    
+    while type(pipe.poll()) != int:
+        time.sleep(1)
+    
+    status = pipe.poll()
+    output = pipe.stdout.read()
+    
+    return status, output
+
+def split_url(url):
+    match = RE_SPLIT_URL.match(url)
+    
+    if match:
+        proto = match.group(1)
+        host  = match.group(2)
+        uri   = match.group(3)
+    
+    else:
+        fail("Failed to split URL '%s'" % url)
+    
+    return proto, host, uri
+
+def get_akamai_stream(url):
+    proto, host, uri = split_url(url)
+    conn             = httplib.HTTPConnection(host)
+    
+    conn.request("GET", "/%s" % uri)
+    
+    response = conn.getresponse()
+    data     = response.read()
+    
+    if response.status != 200:
+        fail("Failed to retrieve URL '%s'" % url)
+    
+    for line in data.split('\n'):
+        match = RE_EXTRACT_VIDEO_ID.match(line)
+        
+        if match:
+            break
+    
+    if match:
+        videoid = match.group(1)
+    
+    else:
+        conn.close()
+        fail("Failed to extract video id")
+    
+    conn.request("GET", "%s=%s" % (URI_WEBSERVICE, videoid))
+    
+    response = conn.getresponse()
+    data     = response.read()
+    
+    if response.status != 200:
+        fail("Failed to retrieve XML from webservice")
+    
+    xml       = lxml.etree.fromstring(data)
+    pluzzurl  = xml.xpath('//url_reference')[0].text
+    filename  = pluzzurl.split("/")[-1].replace(".html", ".wmv")
+    akamaiurl = xml.xpath('//url')[0].text
+    
+    return filename, akamaiurl
+
+def download_steam(url, destdir, filename):
+    dest           = os.path.join(destdir, filename)
+    status, output = execute("mplayer '%s' -dumpstream -dumpfile %s" % (url, dest))
+    
+    return status
+
+def main():
+    filename, akamaiurl = get_akamai_stream(URL_20H_BOOTSTRAP)
+    status              = download_steam(akamaiurl, sys.argv[1], filename)
+    
+    if status != 0:
+        fail("Failed to download stream '%s'" % akamaiurl)
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        fail("Please specify a destination directory")
+    
+    elif not os.path.exists(sys.argv[1]):
+        fail("Destination directory %s does not exists" % sys.argv[1])
+    
+    main()
